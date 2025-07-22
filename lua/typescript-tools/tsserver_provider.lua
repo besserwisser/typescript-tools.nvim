@@ -13,6 +13,7 @@ local is_win = vim.loop.os_uname().version:find "Windows"
 ---@field private instance TsserverProvider
 ---@field private callbacks function[]
 ---@field private root_dir Path
+---@field private node_module_ancestor Path
 ---@field private npm_local_path Path
 ---@field private yarn_sdk_path Path
 ---@field private npm_global_path Path
@@ -67,7 +68,8 @@ function TsserverProvider.new(on_loaded)
   local sanitized_bufname = vim.fs.normalize(bufname)
 
   self.root_dir = Path:new(config.get_root_dir(sanitized_bufname, bufnr))
-  self.npm_local_path = find_deep_node_modules_ancestor(sanitized_bufname):joinpath "node_modules"
+  self.node_module_ancestor = find_deep_node_modules_ancestor(sanitized_bufname)
+  self.npm_local_path = self.node_module_ancestor:joinpath "node_modules"
   self.yarn_sdk_path = find_yarn_sdk(sanitized_bufname):joinpath ".yarn/sdks"
   self.global_install_path = Path:new(vim.fn.resolve(vim.fn.exepath "tsserver")):parent():parent()
 
@@ -88,14 +90,28 @@ end
 
 ---@private
 ---@return string, string[]
-function TsserverProvider:make_npm_root_params() -- luacheck: ignore
+function TsserverProvider:make_npm_root_params()
   local args = { "root", "-g" }
+  local package_json_path = self.node_module_ancestor:joinpath "package.json"
+  local package_manager
 
-  if is_win then
-    return "cmd.exe", { "/c", "npm", unpack(args) }
+  if package_json_path:exists() then
+    -- pcall will handle cases where the file can't be read
+    local ok, package_json =
+        pcall(vim.json.decode, package_json_path:read(), { luanil = { object = true } })
+    if ok and package_json and package_json.packageManager then
+      package_manager = package_json.packageManager:match "^(%w+)"
+    end
   end
 
-  return "npm", args
+  assert(package_manager, "Cannot determine package manager from package.json")
+
+  local pm = package_manager or "npm"
+  if is_win then
+    return "cmd.exe", { "/c", pm, unpack(args) }
+  end
+
+  return pm, args
 end
 
 ---@param on_loaded function
@@ -127,7 +143,7 @@ local function get_tsserver_from_mason()
     if (plugin_config.tsserver_path or ""):find(tsserver_path:absolute(), 1, true) then
       vim.schedule_wrap(vim.notify_once)(
         "[typescript-tools] We detected usage of `tsserver_path` to integrate with Mason. "
-          .. "This integration is now built-in you can remove unnecessary code from your config.",
+        .. "This integration is now built-in you can remove unnecessary code from your config.",
         vim.log.levels.WARN
       )
     end
@@ -185,7 +201,7 @@ function TsserverProvider:get_executable_path()
   if not tsserver_exists(tsserver_path) then
     local _ = log.trace() and log.trace("tsserver", tsserver_path:absolute(), "not exists.")
     tsserver_path =
-      self.global_install_path:joinpath("lib", "node_modules", "typescript", "lib", "tsserver.js")
+        self.global_install_path:joinpath("lib", "node_modules", "typescript", "lib", "tsserver.js")
   end
 
   -- INFO: if there is no local or global tsserver just error out
@@ -235,7 +251,7 @@ function TsserverProvider:get_version()
   end
 
   local ok, package_json =
-    pcall(vim.json.decode, package_json_path:read(), { luanil = { object = true } })
+      pcall(vim.json.decode, package_json_path:read(), { luanil = { object = true } })
 
   if ok and package_json then
     return vim.version.parse(package_json.version)
